@@ -66,7 +66,7 @@ class GroqAutoResponder(commands.Cog):
             return
 
         api_key = config["api_key"]
-        model = config.get("model", "llama-3.1-8b-instant")
+        model = config.get("model", "openai/gpt-oss-120b")
 
         # Append user message to thread history
         self.active_threads[thread.id].append({"role": "user", "content": message.content})
