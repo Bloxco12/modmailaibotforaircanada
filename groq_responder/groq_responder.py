@@ -93,7 +93,7 @@ class GroqAutoResponder(commands.Cog):
                         if resp.status != 200:
                             error_text = await resp.text()
                             await thread.channel.send(
-                                f"⚠️ **Groq AI Error ({resp.status}):** Could not generate a response.\n```{error_text[:500]}```"
+                                f"⚠️ **Air Canada Helpdesk AI Error ({resp.status}):** Could not generate a response.\n```{error_text[:500]}```"
                             )
                             return
 
@@ -101,7 +101,7 @@ class GroqAutoResponder(commands.Cog):
                         ai_reply = data["choices"][0]["message"]["content"]
 
                 except Exception as e:
-                    await thread.channel.send(f"⚠️ **Groq AI Connection Error:** `{e}`")
+                    await thread.channel.send(f"⚠️ **Air Canada Helpdesk AI Connection Error:** `{e}`")
                     return
 
         # Check if the AI triggered an escalation
@@ -111,13 +111,16 @@ class GroqAutoResponder(commands.Cog):
         # Save AI response to conversation memory
         self.active_threads[thread.id].append({"role": "assistant", "content": clean_reply})
 
-        # Send reply to the user and log it in the Modmail ticket channel
-        await thread.recipient.send(clean_reply)
+        # Build the embed for both the user DM and the Modmail ticket channel
         embed = discord.Embed(
             description=clean_reply,
-            color=discord.Color.blurple(),
+            color=discord.Color.red(),
         )
-        embed.set_author(name="Groq AI Responder", icon_url=self.bot.user.display_avatar.url)
+        embed.set_author(name="Air Canada Helpdesk", icon_url=self.bot.user.display_avatar.url)
+        embed.set_footer(text="AI Assistant")
+
+        # Send reply to the user and log it in the Modmail ticket channel
+        await thread.recipient.send(embed=embed)
         await thread.channel.send(embed=embed)
 
         # Trigger Staff Escalation alert in the ticket channel
@@ -125,7 +128,7 @@ class GroqAutoResponder(commands.Cog):
             escalation_embed = discord.Embed(
                 title="🚨 Staff Escalation",
                 description=(
-                    "The AI assistant could not fully resolve this issue and has escalated the ticket.\n\n"
+                    "The AI Assistant could not fully resolve this issue and has escalated the ticket.\n\n"
                     f"Run `{self.bot.prefix}taketicketover` to disable the AI and take over this conversation."
                 ),
                 color=discord.Color.red(),
@@ -144,12 +147,12 @@ class GroqAutoResponder(commands.Cog):
             self.active_threads.pop(thread.id)
             embed = discord.Embed(
                 title="✅ Ticket Taken Over",
-                description=f"{ctx.author.mention} has taken over this ticket. Groq AI is now disabled for this thread.",
+                description=f"{ctx.author.mention} has taken over this ticket. AI Assistant is now disabled for this thread.",
                 color=discord.Color.green(),
             )
             await ctx.send(embed=embed)
         else:
-            await ctx.send("ℹ️ Groq AI is not active in this ticket.")
+            await ctx.send("ℹ️ AI Assistant is not active in this ticket.")
 
     @commands.command(name="setgroqkey")
     @checks.has_permissions(PermissionLevel.ADMIN)
@@ -164,18 +167,18 @@ class GroqAutoResponder(commands.Cog):
             await ctx.message.delete()
         except discord.Forbidden:
             pass
-        await ctx.send("✅ Groq API key saved! Your message was deleted for security.")
+        await ctx.send("✅ API key saved! Your message was deleted for security.")
 
     @commands.command(name="setgroqmodel")
     @checks.has_permissions(PermissionLevel.ADMIN)
     async def setgroqmodel(self, ctx, model_name: str):
-        """Optional: Change the Groq model (default: llama-3.1-8b-instant)."""
+        """Optional: Change the Groq model (default: openai/gpt-oss-120b)."""
         await self.db.find_one_and_update(
             {"_id": "config"},
             {"$set": {"model": model_name}},
             upsert=True,
         )
-        await ctx.send(f"✅ Groq model updated to `{model_name}`.")
+        await ctx.send(f"✅ AI model updated to `{model_name}`.")
 
 
 async def setup(bot):
