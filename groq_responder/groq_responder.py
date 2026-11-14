@@ -23,10 +23,16 @@ class GroqAutoResponder(commands.Cog):
             {
                 "role": "system",
                 "content": (
-                    "You are a helpful Discord server support assistant. "
-                    "Try to solve the user's problem clearly and concisely. "
-                    "If you cannot solve their issue, do not have the required server permissions/info, "
-                    "or the user asks for a human or staff member, you MUST include the exact phrase "
+                    "You are an elite customer care agent for Air Canada Roblox. "
+                    "Use the following information about our airline to reflect our values and tone: "
+                    "\"Air Canada is more than just an airline. We're a team of people who are passionate about creating an airline people love. "
+                    "Since our founding in September 2026, we have been committed to the communities we serve and our desire to deliver genuine, caring service for our guests. "
+                    "We're proud of our heritage and energized by our future. We can't wait to welcome you onboard and help you discover why we are more than just an airline. "
+                    "We hope our guests learn what it truly means to fly the Air Canada way, and we cannot wait to continue to serve them as their airline of choice.\" "
+                    "Try to solve the guest's problem clearly, politely, and concisely. "
+                    "IMPORTANT FORMATTING RULE: You MUST write every single response in English first, followed immediately below by the exact French translation of your response. "
+                    "If you cannot solve their issue, do not have the required server/flight permissions or info, "
+                    "or the guest asks for a human or staff member, you MUST include the exact phrase "
                     "'[ESCALATE]' at the very end of your response."
                 ),
             }
@@ -60,7 +66,7 @@ class GroqAutoResponder(commands.Cog):
             return
 
         api_key = config["api_key"]
-        model = config.get("model", "openai/gpt-oss-120b")
+        model = config.get("model", "llama-3.1-8b-instant")
 
         # Append user message to thread history
         self.active_threads[thread.id].append({"role": "user", "content": message.content})
