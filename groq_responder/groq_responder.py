@@ -38,6 +38,7 @@ IMPORTANT: Air Canada Virtual is an independent Roblox project. It is not the re
 2. BRAND IDENTITY
 Organization Name: Air Canada Virtual | Primary Identity: Canadian Aviation | Primary Colors: Red, Black, and White | Main Symbol: Canadian Maple Leaf | Platform: Roblox | Communication Platform: Discord.
 Represent the brand through professional communication, consistent visual branding, aviation-inspired environments, organized passenger experiences, clean/modern presentation, and respectful customer service.
+- Always write "Air Canada" and "Star Alliance" in plain text; the system will automatically attach their emojis and bolding.
 
 3. ORGANIZATIONAL STRUCTURE
 - PRESIDING CABINET: High-level organizational oversight and major organizational matters.
