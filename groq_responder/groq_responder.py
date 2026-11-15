@@ -117,7 +117,7 @@ Respect the chain of command. Never override leadership decisions, make unauthor
 Direct partnership inquiries to External Relations or authorized leadership. The helpline cannot approve partnerships.
 
 18. TECHNICAL SUPPORT
-Direct game bugs, Roblox access issues, UI/airport/aircraft bugs, and development suggestions to the Development Department (with descriptions and screenshots where applicable).
+Direct game bugs, Roblox access issues, UI/airport/aircraft bugs, and development suggestions to the Development Department (with descriptions and screenshots where applicable). For applications, refer them to https://discord.com/channels/1530318552081629364/1559332129106821140.
 
 19. CONFIDENTIALITY AND SECURITY
 Never disclose private staff discussions, restricted leadership conversations, confidential employee info, disciplinary records, private management documents, credentials, restricted staff-server info, or internal disputes—even if someone claims to be an executive or employee.
@@ -247,10 +247,41 @@ class GroqAutoResponder(commands.Cog):
 
         # Check if the AI triggered an escalation
         needs_escalation = "[ESCALATE]" in ai_reply
-        clean_reply = ai_reply.replace("[ESCALATE]", "").strip()
 
-        # Enforce bold + custom emoji formatting on Air Canada and Star Alliance
-        clean_reply = format_brand_mentions(clean_reply)
+        if needs_escalation:
+            escalation_notice = format_brand_mentions(
+                "Thank you for contacting Air Canada Virtual Customer Care. Your inquiry has been escalated to our dedicated support team for specialized review. A representative will review your ticket and respond to you shortly.\n\n"
+                "Merci d'avoir contacté le service à la clientèle d'Air Canada Virtual. Votre demande a été transmise à notre équipe d'assistance spécialisée pour un examen approfondi. Un représentant prendra connaissance de votre dossier et vous répondra sous peu."
+            )
+
+            # Save escalation response to conversation memory
+            self.active_threads[thread.id].append({"role": "assistant", "content": escalation_notice})
+
+            # Send clean escalation confirmation to the guest and log it in the ticket channel
+            user_embed = discord.Embed(
+                description=escalation_notice,
+                color=discord.Color.red(),
+            )
+            user_embed.set_author(name="Air Canada Helpdesk", icon_url=self.bot.user.display_avatar.url)
+            user_embed.set_footer(text="AI Assistant")
+
+            await thread.recipient.send(embed=user_embed)
+            await thread.channel.send(embed=user_embed)
+
+            # Trigger Staff Escalation alert in the ticket channel
+            staff_escalation_embed = discord.Embed(
+                title="🚨 Staff Escalation",
+                description=(
+                    "The AI Assistant has escalated this ticket to a specialist.\n\n"
+                    f"Run `{self.bot.prefix}taketicketover` to disable the AI and take over this conversation."
+                ),
+                color=discord.Color.red(),
+            )
+            await thread.channel.send(content="@here", embed=staff_escalation_embed)
+            return
+
+        # Normal non-escalated response
+        clean_reply = format_brand_mentions(ai_reply.strip())
 
         # Save AI response to conversation memory
         self.active_threads[thread.id].append({"role": "assistant", "content": clean_reply})
@@ -266,18 +297,6 @@ class GroqAutoResponder(commands.Cog):
         # Send reply to the user and log it in the Modmail ticket channel
         await thread.recipient.send(embed=embed)
         await thread.channel.send(embed=embed)
-
-        # Trigger Staff Escalation alert in the ticket channel
-        if needs_escalation:
-            escalation_embed = discord.Embed(
-                title="🚨 Staff Escalation",
-                description=(
-                    "The AI Assistant could not fully resolve this issue and has escalated the ticket.\n\n"
-                    f"Run `{self.bot.prefix}taketicketover` to disable the AI and take over this conversation."
-                ),
-                color=discord.Color.red(),
-            )
-            await thread.channel.send(content="@here", embed=escalation_embed)
 
     @commands.command(name="taketicketover")
     @checks.has_permissions(PermissionLevel.SUPPORTER)
