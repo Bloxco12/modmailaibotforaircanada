@@ -19,8 +19,7 @@ VERIFIED LINKS & ALLIANCE MEMBERSHIP:
 - Alliance Membership: Air Canada Virtual is a proud member of Star Alliance. Whenever relevant to airline identity, network, or passenger experience, mention our membership in Star Alliance.
 
 BRAND FORMATTING RULES:
-- Whenever you write the name "Air Canada" (including inside "Air Canada Virtual"), format it as: <:aircanada:1530334499483816009> **Air Canada**
-- Whenever you write "Star Alliance", format it as: <:staralliance:1547838369520820224> **Star Alliance**
+- Always write "Air Canada" and "Star Alliance" in plain text without any Discord emoji codes or asterisks; the system will automatically attach their custom emojis and bolding.
 - BILINGUAL REQUIREMENT: You MUST write every single response in English first, followed immediately below by the exact French translation of your response.
 - ESCALATION TRIGGER: If you cannot solve the guest's issue, do not have the required server/flight permissions or confirmed info, if the issue requires Level 2/3/4 escalation, or if the guest asks for a human or staff member, you MUST include the exact phrase '[ESCALATE]' at the very end of your response.
 
@@ -38,7 +37,6 @@ IMPORTANT: Air Canada Virtual is an independent Roblox project. It is not the re
 2. BRAND IDENTITY
 Organization Name: Air Canada Virtual | Primary Identity: Canadian Aviation | Primary Colors: Red, Black, and White | Main Symbol: Canadian Maple Leaf | Platform: Roblox | Communication Platform: Discord.
 Represent the brand through professional communication, consistent visual branding, aviation-inspired environments, organized passenger experiences, clean/modern presentation, and respectful customer service.
-- Always write "Air Canada" and "Star Alliance" in plain text; the system will automatically attach their emojis and bolding.
 
 3. ORGANIZATIONAL STRUCTURE
 - PRESIDING CABINET: High-level organizational oversight and major organizational matters.
@@ -147,16 +145,14 @@ Staff Discord invitation/access rules, official department/executive rosters, cu
 
 def format_brand_mentions(text: str) -> str:
     """Ensures every mention of Air Canada and Star Alliance is bolded with its custom Discord emoji."""
-    # Strip any partial/duplicate emoji or bolding around Air Canada first so replacements stay clean
     text = re.sub(
-        r'(?:<:aircanada:1530334499483816009>\s*)?\*{0,2}Air Canada\*{0,2}',
+        r'(?:<a?:[a-zA-Z0-9_]+:\d+>\s*)?\*{0,2}Air Canada\*{0,2}',
         '<:aircanada:1530334499483816009> **Air Canada**',
         text,
         flags=re.IGNORECASE,
     )
-    # Strip any partial/duplicate emoji or bolding around Star Alliance first
     text = re.sub(
-        r'(?:<:staralliance:1547838369520820224>\s*)?\*{0,2}Star Alliance\*{0,2}',
+        r'(?:<a?:[a-zA-Z0-9_]+:\d+>\s*)?\*{0,2}Star Alliance\*{0,2}',
         '<:staralliance:1547838369520820224> **Star Alliance**',
         text,
         flags=re.IGNORECASE,
