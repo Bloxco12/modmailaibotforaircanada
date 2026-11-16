@@ -24,7 +24,7 @@ VERIFIED LINKS & ALLIANCE MEMBERSHIP:
 BRAND FORMATTING RULES:
 - Always write "Air Canada" and "Star Alliance" in plain text without any Discord emoji codes or asterisks; the system will automatically attach their custom emojis and bolding.
 - BILINGUAL REQUIREMENT: You MUST write every single response in English first, followed immediately below by the exact French translation of your response.
-- FASTPASS TRIGGER: If the guest asks for a FastPass (or fast pass to staff), you MUST respond with the exact tag '[FASTPASS]' so the system sends the FastPass application template and escalates the ticket to staff.
+- FASTPASS TRIGGER: If the guest asks for a FastPass (or fast pass to staff), you MUST respond with the exact tag '[FASTPASS]' so the system sends them the FastPass application template to fill out first. Do NOT include '[ESCALATE]' yet until they submit their form.
 - ESCALATION TRIGGER: If you cannot solve the guest's issue, do not have the required server/flight permissions or confirmed info, if the issue requires Level 2/3/4 escalation, or if the guest asks for a human or staff member, you MUST include the exact phrase '[ESCALATE]' at the very end of your response.
 
 ====================================================================
@@ -183,6 +183,8 @@ class GroqAutoResponder(commands.Cog):
         self.db = bot.plugin_db.get_partition(self)
         # Tracks active AI threads and stores conversation history per thread ID
         self.active_threads = {}
+        # Tracks threads where the FastPass form was sent and we are waiting for the user's reply
+        self.pending_fastpass = set()
         # Global rate-limit lock and timestamp to enforce at least 5 seconds between Groq API requests
         self._rate_lock = asyncio.Lock()
         self._last_request_time = 0.0
@@ -274,26 +276,50 @@ class GroqAutoResponder(commands.Cog):
             "urgency_note": "Standard review required by an available staff representative.",
         }
 
-    async def _send_escalation_handoff(self, thread, session, api_key: str, model: str, history: list, is_fastpass: bool = False):
-        """Sends the user escalation/FastPass notice and posts the structured staff escalation embed."""
+    async def _send_fastpass_form(self, thread):
+        """Sends the FastPass template to the guest and marks the thread as awaiting their submission."""
+        self.pending_fastpass.add(thread.id)
+
+        fastpass_prompt = format_brand_mentions(
+            f"{FASTPASS_MESSAGE}\n\n"
+            "Please fill out and send the FastPass form above. Once you submit your answers, your application will be escalated to our Personnel & Staff team for review.\n\n"
+            "Veuillez remplir et envoyer le formulaire FastPass ci-dessus. Une fois vos réponses envoyées, votre candidature sera transmise à notre équipe du personnel pour examen."
+        )
+
+        if thread.id in self.active_threads:
+            self.active_threads[thread.id].append({"role": "assistant", "content": fastpass_prompt})
+
+        embed = discord.Embed(
+            description=fastpass_prompt,
+            color=discord.Color.red(),
+        )
+        embed.set_author(name="Air Canada Helpdesk", icon_url=self.bot.user.display_avatar.url)
+        embed.set_footer(text="AI Assistant")
+
+        await thread.recipient.send(embed=embed)
+        await thread.channel.send(embed=embed)
+
+    async def _send_escalation_handoff(self, thread, session, api_key: str, model: str, history: list, is_fastpass_submission: bool = False):
+        """Sends the user escalation notice and posts the structured staff escalation embed."""
         summary = await self._summarize_escalation(session, api_key, model, history)
 
-        if is_fastpass:
+        if is_fastpass_submission:
+            submitted_form = next((m["content"] for m in reversed(history) if m["role"] == "user"), "N/A")
             guest_notice = format_brand_mentions(
-                f"{FASTPASS_MESSAGE}\n\n"
-                "Please fill out the FastPass form above and reply with your answers. Your ticket has been escalated to our Personnel & Staff team, who will review your submission shortly.\n\n"
-                "Veuillez remplir le formulaire FastPass ci-dessus et répondre avec vos informations. Votre demande a été transmise à notre équipe du personnel, qui examinera votre candidature sous peu."
+                "Thank you for submitting your FastPass to Staff application! Your form has been escalated to our Personnel & Staff team for review, and a representative will respond to you shortly.\n\n"
+                "Merci d'avoir soumis votre formulaire FastPass au personnel ! Votre candidature a été transmise à notre équipe du personnel pour examen et un représentant vous répondra sous peu."
             )
             summary["contact_type"] = "Personnel / Staff Recruitment (FastPass)"
-            summary["ways_attempted"] = "Provided the official FastPass to Staff form to the applicant and escalated to staff."
-            summary["escalation_reason"] = "Guest requested a FastPass to Staff."
+            summary["user_concern"] = f"Submitted FastPass to Staff form:\n{submitted_form}"[:1024]
+            summary["ways_attempted"] = "Provided the FastPass to Staff form and collected the applicant's completed submission."
+            summary["escalation_reason"] = "Guest completed and submitted the FastPass to Staff application form."
         else:
             guest_notice = format_brand_mentions(
                 "Thank you for contacting Air Canada Virtual Customer Care. Your inquiry has been escalated to our dedicated support team for specialized review. A representative will review your ticket and respond to you shortly.\n\n"
                 "Merci d'avoir contacté le service à la clientèle d'Air Canada Virtual. Votre demande a été transmise à notre équipe d'assistance spécialisée pour un examen approfondi. Un représentant prendra connaissance de votre dossier et vous répondra sous peu."
             )
 
-        # Send clean confirmation/FastPass form to the guest and log it in the ticket channel
+        # Send clean confirmation to the guest and log it in the ticket channel
         user_embed = discord.Embed(
             description=guest_notice,
             color=discord.Color.red(),
@@ -369,11 +395,13 @@ class GroqAutoResponder(commands.Cog):
                 "content": SYSTEM_PROMPT,
             }
         ]
+        self.pending_fastpass.discard(thread.id)
 
     @commands.Cog.listener()
     async def on_thread_close(self, thread, closer, silent, delete_channel, message, timer):
         """Removes thread data from memory when the ticket closes."""
         self.active_threads.pop(thread.id, None)
+        self.pending_fastpass.discard(thread.id)
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -405,12 +433,21 @@ class GroqAutoResponder(commands.Cog):
 
         async with thread.recipient.typing():
             async with aiohttp.ClientSession() as session:
-                # Immediately detect FastPass requests so they never miss sending the form
+                # If we were waiting for their FastPass form, check if they sent their submission
+                if thread.id in self.pending_fastpass:
+                    if re.search(r"^\s*(nevermind|never mind|cancel|nvm|no thanks)\s*[.!?]*\s*$", message.content, flags=re.IGNORECASE):
+                        self.pending_fastpass.discard(thread.id)
+                    else:
+                        self.pending_fastpass.discard(thread.id)
+                        history = self.active_threads.pop(thread.id, [])
+                        await self._send_escalation_handoff(
+                            thread, session, api_key, model, history, is_fastpass_submission=True
+                        )
+                        return
+
+                # If guest is asking for a FastPass, send the form FIRST without escalating yet
                 if re.search(r"\bfast\s*pass\b", message.content, flags=re.IGNORECASE):
-                    history = self.active_threads.pop(thread.id, [])
-                    await self._send_escalation_handoff(
-                        thread, session, api_key, model, history, is_fastpass=True
-                    )
+                    await self._send_fastpass_form(thread)
                     return
 
                 payload = {
@@ -434,14 +471,16 @@ class GroqAutoResponder(commands.Cog):
                     await thread.channel.send(f"⚠️ **Air Canada Helpdesk AI Connection Error:** `{e}`")
                     return
 
-                # Check if the AI triggered FastPass or standard escalation
-                is_fastpass = "[FASTPASS]" in ai_reply
-                needs_escalation = "[ESCALATE]" in ai_reply or is_fastpass
+                # If the AI triggered [FASTPASS], send the form first and wait for their reply
+                if "[FASTPASS]" in ai_reply:
+                    await self._send_fastpass_form(thread)
+                    return
 
-                if needs_escalation:
+                # Check if the AI triggered standard escalation
+                if "[ESCALATE]" in ai_reply:
                     history = self.active_threads.pop(thread.id, [])
                     await self._send_escalation_handoff(
-                        thread, session, api_key, model, history, is_fastpass=is_fastpass
+                        thread, session, api_key, model, history, is_fastpass_submission=False
                     )
                     return
 
@@ -472,6 +511,7 @@ class GroqAutoResponder(commands.Cog):
             return await ctx.send("❌ This command must be used inside an active Modmail ticket channel.")
 
         self.active_threads.pop(thread.id, None)
+        self.pending_fastpass.discard(thread.id)
         embed = discord.Embed(
             title="✅ Ticket Taken Over",
             description=f"{ctx.author.mention} has taken over this ticket and will assist the guest from here.",
