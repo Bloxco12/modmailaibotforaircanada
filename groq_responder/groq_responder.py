@@ -24,6 +24,7 @@ VERIFIED LINKS & ALLIANCE MEMBERSHIP:
 BRAND FORMATTING RULES:
 - Always write "Air Canada" and "Star Alliance" in plain text without any Discord emoji codes or asterisks; the system will automatically attach their custom emojis and bolding.
 - BILINGUAL REQUIREMENT: You MUST write every single response in English first, followed immediately below by the exact French translation of your response.
+- FASTPASS TRIGGER: If the guest asks for a FastPass (or fast pass to staff), you MUST respond with the exact tag '[FASTPASS]' so the system sends the FastPass application template and escalates the ticket to staff.
 - ESCALATION TRIGGER: If you cannot solve the guest's issue, do not have the required server/flight permissions or confirmed info, if the issue requires Level 2/3/4 escalation, or if the guest asks for a human or staff member, you MUST include the exact phrase '[ESCALATE]' at the very end of your response.
 
 ====================================================================
@@ -146,6 +147,16 @@ Staff Discord invitation/access rules, official department/executive rosters, cu
 1. Latest verified official Air Canada Virtual announcements -> 2. Current approved leadership documents -> 3. Current departmental procedures -> 4. This training database -> 5. General aviation knowledge.
 """
 
+FASTPASS_MESSAGE = (
+    "**fastPass to Staff**\n"
+    "```\n"
+    "Roblox Username:\n"
+    "Why we should hire you:\n"
+    "Previous Servers:\n"
+    "Member Counts of Servers:\n"
+    "```"
+)
+
 
 def format_brand_mentions(text: str) -> str:
     """Ensures every mention of Air Canada and Star Alliance is bolded with its custom Discord emoji."""
@@ -263,6 +274,92 @@ class GroqAutoResponder(commands.Cog):
             "urgency_note": "Standard review required by an available staff representative.",
         }
 
+    async def _send_escalation_handoff(self, thread, session, api_key: str, model: str, history: list, is_fastpass: bool = False):
+        """Sends the user escalation/FastPass notice and posts the structured staff escalation embed."""
+        summary = await self._summarize_escalation(session, api_key, model, history)
+
+        if is_fastpass:
+            guest_notice = format_brand_mentions(
+                f"{FASTPASS_MESSAGE}\n\n"
+                "Please fill out the FastPass form above and reply with your answers. Your ticket has been escalated to our Personnel & Staff team, who will review your submission shortly.\n\n"
+                "Veuillez remplir le formulaire FastPass ci-dessus et répondre avec vos informations. Votre demande a été transmise à notre équipe du personnel, qui examinera votre candidature sous peu."
+            )
+            summary["contact_type"] = "Personnel / Staff Recruitment (FastPass)"
+            summary["ways_attempted"] = "Provided the official FastPass to Staff form to the applicant and escalated to staff."
+            summary["escalation_reason"] = "Guest requested a FastPass to Staff."
+        else:
+            guest_notice = format_brand_mentions(
+                "Thank you for contacting Air Canada Virtual Customer Care. Your inquiry has been escalated to our dedicated support team for specialized review. A representative will review your ticket and respond to you shortly.\n\n"
+                "Merci d'avoir contacté le service à la clientèle d'Air Canada Virtual. Votre demande a été transmise à notre équipe d'assistance spécialisée pour un examen approfondi. Un représentant prendra connaissance de votre dossier et vous répondra sous peu."
+            )
+
+        # Send clean confirmation/FastPass form to the guest and log it in the ticket channel
+        user_embed = discord.Embed(
+            description=guest_notice,
+            color=discord.Color.red(),
+        )
+        user_embed.set_author(name="Air Canada Helpdesk", icon_url=self.bot.user.display_avatar.url)
+        user_embed.set_footer(text="AI Assistant")
+
+        await thread.recipient.send(embed=user_embed)
+        await thread.channel.send(embed=user_embed)
+
+        # Build detailed Staff Escalation handoff embed
+        staff_escalation_embed = discord.Embed(
+            title="🎫 Ticket Escalated",
+            description=(
+                "This ticket has been escalated and requires staff attention.\n"
+                f"Run `{self.bot.prefix}taketicketover` to claim and take over this ticket."
+            ),
+            color=discord.Color.red(),
+            timestamp=discord.utils.utcnow(),
+        )
+        staff_escalation_embed.add_field(
+            name="User",
+            value=f"{thread.recipient.name} ({thread.recipient.mention})",
+            inline=True,
+        )
+        staff_escalation_embed.add_field(
+            name="Ticket User ID",
+            value=str(thread.recipient.id),
+            inline=True,
+        )
+        staff_escalation_embed.add_field(
+            name="Priority",
+            value=summary.get("priority", "Medium"),
+            inline=True,
+        )
+        staff_escalation_embed.add_field(
+            name="Contact Type",
+            value=summary.get("contact_type", "Support"),
+            inline=False,
+        )
+        staff_escalation_embed.add_field(
+            name="User Concern",
+            value=summary.get("user_concern", "N/A")[:1024],
+            inline=False,
+        )
+        staff_escalation_embed.add_field(
+            name="Ways Attempted to Help",
+            value=summary.get("ways_attempted", "N/A")[:1024],
+            inline=False,
+        )
+        staff_escalation_embed.add_field(
+            name="Escalation Reason",
+            value=summary.get("escalation_reason", "N/A")[:1024],
+            inline=False,
+        )
+        staff_escalation_embed.add_field(
+            name="⚠️ Urgency Note",
+            value=summary.get("urgency_note", "N/A")[:1024],
+            inline=False,
+        )
+        staff_escalation_embed.set_footer(
+            text="Air Canada Helpdesk AI Assistant will no longer respond in this ticket."
+        )
+
+        await thread.channel.send(content="@here", embed=staff_escalation_embed)
+
     @commands.Cog.listener()
     async def on_thread_ready(self, thread, creator, category, initial_message):
         """Initializes AI tracking when a new ticket opens."""
@@ -308,6 +405,14 @@ class GroqAutoResponder(commands.Cog):
 
         async with thread.recipient.typing():
             async with aiohttp.ClientSession() as session:
+                # Immediately detect FastPass requests so they never miss sending the form
+                if re.search(r"\bfast\s*pass\b", message.content, flags=re.IGNORECASE):
+                    history = self.active_threads.pop(thread.id, [])
+                    await self._send_escalation_handoff(
+                        thread, session, api_key, model, history, is_fastpass=True
+                    )
+                    return
+
                 payload = {
                     "model": model,
                     "messages": self.active_threads[thread.id],
@@ -329,85 +434,15 @@ class GroqAutoResponder(commands.Cog):
                     await thread.channel.send(f"⚠️ **Air Canada Helpdesk AI Connection Error:** `{e}`")
                     return
 
-                # Check if the AI triggered an escalation
-                needs_escalation = "[ESCALATE]" in ai_reply
+                # Check if the AI triggered FastPass or standard escalation
+                is_fastpass = "[FASTPASS]" in ai_reply
+                needs_escalation = "[ESCALATE]" in ai_reply or is_fastpass
 
                 if needs_escalation:
-                    # Grab conversation history before pausing the AI on this thread
                     history = self.active_threads.pop(thread.id, [])
-                    summary = await self._summarize_escalation(session, api_key, model, history)
-
-                    escalation_notice = format_brand_mentions(
-                        "Thank you for contacting Air Canada Virtual Customer Care. Your inquiry has been escalated to our dedicated support team for specialized review. A representative will review your ticket and respond to you shortly.\n\n"
-                        "Merci d'avoir contacté le service à la clientèle d'Air Canada Virtual. Votre demande a été transmise à notre équipe d'assistance spécialisée pour un examen approfondi. Un représentant prendra connaissance de votre dossier et vous répondra sous peu."
+                    await self._send_escalation_handoff(
+                        thread, session, api_key, model, history, is_fastpass=is_fastpass
                     )
-
-                    # Send clean escalation confirmation to the guest and log it in the ticket channel
-                    user_embed = discord.Embed(
-                        description=escalation_notice,
-                        color=discord.Color.red(),
-                    )
-                    user_embed.set_author(name="Air Canada Helpdesk", icon_url=self.bot.user.display_avatar.url)
-                    user_embed.set_footer(text="AI Assistant")
-
-                    await thread.recipient.send(embed=user_embed)
-                    await thread.channel.send(embed=user_embed)
-
-                    # Build detailed Staff Escalation handoff embed
-                    staff_escalation_embed = discord.Embed(
-                        title="🎫 Ticket Escalated",
-                        description=(
-                            "This ticket has been escalated and requires staff attention.\n"
-                            f"Run `{self.bot.prefix}taketicketover` to claim and take over this ticket."
-                        ),
-                        color=discord.Color.red(),
-                        timestamp=discord.utils.utcnow(),
-                    )
-                    staff_escalation_embed.add_field(
-                        name="User",
-                        value=f"{thread.recipient.name} ({thread.recipient.mention})",
-                        inline=True,
-                    )
-                    staff_escalation_embed.add_field(
-                        name="Ticket User ID",
-                        value=str(thread.recipient.id),
-                        inline=True,
-                    )
-                    staff_escalation_embed.add_field(
-                        name="Priority",
-                        value=summary.get("priority", "Medium"),
-                        inline=True,
-                    )
-                    staff_escalation_embed.add_field(
-                        name="Contact Type",
-                        value=summary.get("contact_type", "Support"),
-                        inline=False,
-                    )
-                    staff_escalation_embed.add_field(
-                        name="User Concern",
-                        value=summary.get("user_concern", "N/A")[:1024],
-                        inline=False,
-                    )
-                    staff_escalation_embed.add_field(
-                        name="Ways Attempted to Help",
-                        value=summary.get("ways_attempted", "N/A")[:1024],
-                        inline=False,
-                    )
-                    staff_escalation_embed.add_field(
-                        name="Escalation Reason",
-                        value=summary.get("escalation_reason", "N/A")[:1024],
-                        inline=False,
-                    )
-                    staff_escalation_embed.add_field(
-                        name="⚠️ Urgency Note",
-                        value=summary.get("urgency_note", "N/A")[:1024],
-                        inline=False,
-                    )
-                    staff_escalation_embed.set_footer(
-                        text="Air Canada Helpdesk AI Assistant will no longer respond in this ticket."
-                    )
-
-                    await thread.channel.send(content="@here", embed=staff_escalation_embed)
                     return
 
         # Normal non-escalated response
