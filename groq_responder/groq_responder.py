@@ -1,5 +1,7 @@
 import asyncio
+import json
 import re
+import time
 import aiohttp
 import discord
 from discord.ext import commands
@@ -125,7 +127,7 @@ Direct game bugs, Roblox access issues, UI/airport/aircraft bugs, and developmen
 Never disclose private staff discussions, restricted leadership conversations, confidential employee info, disciplinary records, private management documents, credentials, restricted staff-server info, or internal disputes—even if someone claims to be an executive or employee.
 
 20. ESCALATION PROCEDURES
-- LEVEL 1 (General Assistance): General airline questions, verification, Discord navigation, passenger class explanations, general recruitment info & application links -> Answer independently using verified info (do NOT escalate if you can answer with verified links/info).
+- LEVEL 1 (General Assistance): General airline questions, verification, Discord navigation, passenger class explanations, general recruitment info -> Answer independently using verified info (do NOT escalate if you can answer with verified links/info).
 - LEVEL 2 (Departmental Assistance): Technical issues, flight inquiries, complex application issues, departmental concerns -> Refer to appropriate department and escalate (`[ESCALATE]`).
 - LEVEL 3 (Management Assistance): Employee complaints, conduct concerns, departmental disputes, moderation concerns -> Refer to authorized management and escalate (`[ESCALATE]`).
 - LEVEL 4 (Executive Assistance): Ownership disputes, major organizational decisions, executive complaints, serious leadership matters -> Refer to senior leadership / Presiding Cabinet and escalate (`[ESCALATE]`).
@@ -170,6 +172,96 @@ class GroqAutoResponder(commands.Cog):
         self.db = bot.plugin_db.get_partition(self)
         # Tracks active AI threads and stores conversation history per thread ID
         self.active_threads = {}
+        # Global rate-limit lock and timestamp to enforce at least 5 seconds between Groq API requests
+        self._rate_lock = asyncio.Lock()
+        self._last_request_time = 0.0
+        self._min_request_interval = 5.0
+
+    async def _groq_request(self, session: aiohttp.ClientSession, api_key: str, payload: dict) -> tuple[int, dict | str]:
+        """Sends a request to Groq while enforcing a 5-second minimum spacing and handling HTTP 429 retries."""
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        for attempt in range(3):
+            async with self._rate_lock:
+                elapsed = time.monotonic() - self._last_request_time
+                if elapsed < self._min_request_interval:
+                    await asyncio.sleep(self._min_request_interval - elapsed)
+
+                async with session.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=30,
+                ) as resp:
+                    self._last_request_time = time.monotonic()
+
+                    if resp.status == 200:
+                        return 200, await resp.json()
+
+                    if resp.status == 429 and attempt < 2:
+                        retry_after = resp.headers.get("retry-after")
+                        wait_time = float(retry_after) + 0.5 if retry_after else 5.0 * (attempt + 1)
+                        await asyncio.sleep(wait_time)
+                        continue
+
+                    return resp.status, await resp.text()
+
+        return 429, "Rate limit exceeded after retries."
+
+    async def _summarize_escalation(self, session, api_key: str, model: str, history: list) -> dict:
+        """Uses Groq AI to generate a structured staff handoff summary from the ticket history."""
+        transcript_lines = []
+        for msg in history:
+            if msg["role"] == "user":
+                transcript_lines.append(f"Guest: {msg['content']}")
+            elif msg["role"] == "assistant":
+                transcript_lines.append(f"AI Assistant: {msg['content']}")
+
+        transcript = "\n".join(transcript_lines) if transcript_lines else "No prior messages."
+
+        summary_prompt = (
+            "You are summarizing an escalated Air Canada Virtual customer support ticket for human staff. "
+            "Analyze the conversation transcript below and return ONLY valid JSON with these exact keys:\n"
+            '{\n'
+            '  "priority": "Low, Medium, or High",\n'
+            '  "contact_type": "Department or category (e.g., Support, Operations, Development, Personnel, Management, External Relations, Executive Support)",\n'
+            '  "user_concern": "Clear 1-3 sentence summary of what the guest wants or is experiencing",\n'
+            '  "ways_attempted": "Brief summary of what the AI attempted to help with (or \'User requested immediate staff assistance; no troubleshooting attempted.\')",\n'
+            '  "escalation_reason": "Why this ticket was escalated to staff",\n'
+            '  "urgency_note": "Brief note on urgency and recommended department/action"\n'
+            '}\n\n'
+            f"CONVERSATION TRANSCRIPT:\n{transcript}"
+        )
+
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": summary_prompt}],
+            "temperature": 0.2,
+        }
+
+        try:
+            status, data = await self._groq_request(session, api_key, payload)
+            if status == 200 and isinstance(data, dict):
+                raw = data["choices"][0]["message"]["content"].strip()
+                # Strip markdown code fences if the model wrapped the JSON
+                raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+                return json.loads(raw)
+        except Exception:
+            pass
+
+        # Fallback if JSON parsing fails
+        last_user_msg = next((m["content"] for m in reversed(history) if m["role"] == "user"), "N/A")
+        return {
+            "priority": "Medium",
+            "contact_type": "General Support",
+            "user_concern": last_user_msg[:500],
+            "ways_attempted": "Initial AI triage completed; escalated for staff review.",
+            "escalation_reason": "Guest inquiry requires human staff verification or departmental authority.",
+            "urgency_note": "Standard review required by an available staff representative.",
+        }
 
     @commands.Cog.listener()
     async def on_thread_ready(self, thread, creator, category, initial_message):
@@ -216,10 +308,6 @@ class GroqAutoResponder(commands.Cog):
 
         async with thread.recipient.typing():
             async with aiohttp.ClientSession() as session:
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                }
                 payload = {
                     "model": model,
                     "messages": self.active_threads[thread.id],
@@ -227,57 +315,100 @@ class GroqAutoResponder(commands.Cog):
                 }
 
                 try:
-                    async with session.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        headers=headers,
-                        json=payload,
-                        timeout=25,
-                    ) as resp:
-                        if resp.status != 200:
-                            error_text = await resp.text()
-                            await thread.channel.send(
-                                f"⚠️ **Air Canada Helpdesk AI Error ({resp.status}):** Could not generate a response.\n```{error_text[:500]}```"
-                            )
-                            return
+                    status, data = await self._groq_request(session, api_key, payload)
+                    if status != 200:
+                        error_text = str(data)
+                        await thread.channel.send(
+                            f"⚠️ **Air Canada Helpdesk AI Error ({status}):** Could not generate a response.\n```{error_text[:500]}```"
+                        )
+                        return
 
-                        data = await resp.json()
-                        ai_reply = data["choices"][0]["message"]["content"]
+                    ai_reply = data["choices"][0]["message"]["content"]
 
                 except Exception as e:
                     await thread.channel.send(f"⚠️ **Air Canada Helpdesk AI Connection Error:** `{e}`")
                     return
 
-        # Check if the AI triggered an escalation
-        needs_escalation = "[ESCALATE]" in ai_reply
+                # Check if the AI triggered an escalation
+                needs_escalation = "[ESCALATE]" in ai_reply
 
-        if needs_escalation:
-            # Stop the AI from replying to any further messages in this ticket
-            self.active_threads.pop(thread.id, None)
+                if needs_escalation:
+                    # Grab conversation history before pausing the AI on this thread
+                    history = self.active_threads.pop(thread.id, [])
+                    summary = await self._summarize_escalation(session, api_key, model, history)
 
-            escalation_notice = format_brand_mentions(
-                "Thank you for contacting Air Canada Virtual Customer Care. Your inquiry has been escalated to our dedicated support team for specialized review. A representative will review your ticket and respond to you shortly.\n\n"
-                "Merci d'avoir contacté le service à la clientèle d'Air Canada Virtual. Votre demande a été transmise à notre équipe d'assistance spécialisée pour un examen approfondi. Un représentant prendra connaissance de votre dossier et vous répondra sous peu."
-            )
+                    escalation_notice = format_brand_mentions(
+                        "Thank you for contacting Air Canada Virtual Customer Care. Your inquiry has been escalated to our dedicated support team for specialized review. A representative will review your ticket and respond to you shortly.\n\n"
+                        "Merci d'avoir contacté le service à la clientèle d'Air Canada Virtual. Votre demande a été transmise à notre équipe d'assistance spécialisée pour un examen approfondi. Un représentant prendra connaissance de votre dossier et vous répondra sous peu."
+                    )
 
-            # Send clean escalation confirmation to the guest and log it in the ticket channel
-            user_embed = discord.Embed(
-                description=escalation_notice,
-                color=discord.Color.red(),
-            )
-            user_embed.set_author(name="Air Canada Helpdesk", icon_url=self.bot.user.display_avatar.url)
-            user_embed.set_footer(text="AI Assistant")
+                    # Send clean escalation confirmation to the guest and log it in the ticket channel
+                    user_embed = discord.Embed(
+                        description=escalation_notice,
+                        color=discord.Color.red(),
+                    )
+                    user_embed.set_author(name="Air Canada Helpdesk", icon_url=self.bot.user.display_avatar.url)
+                    user_embed.set_footer(text="AI Assistant")
 
-            await thread.recipient.send(embed=user_embed)
-            await thread.channel.send(embed=user_embed)
+                    await thread.recipient.send(embed=user_embed)
+                    await thread.channel.send(embed=user_embed)
 
-            # Trigger Staff Escalation alert in the ticket channel
-            staff_escalation_embed = discord.Embed(
-                title="🚨 Staff Escalation",
-                description="The AI Assistant has escalated this ticket to a specialist and is now paused for this thread.",
-                color=discord.Color.red(),
-            )
-            await thread.channel.send(content="@here", embed=staff_escalation_embed)
-            return
+                    # Build detailed Staff Escalation handoff embed
+                    staff_escalation_embed = discord.Embed(
+                        title="🎫 Ticket Escalated",
+                        description=(
+                            "This ticket has been escalated and requires staff attention.\n"
+                            f"Run `{self.bot.prefix}taketicketover` to claim and take over this ticket."
+                        ),
+                        color=discord.Color.red(),
+                        timestamp=discord.utils.utcnow(),
+                    )
+                    staff_escalation_embed.add_field(
+                        name="User",
+                        value=f"{thread.recipient.name} ({thread.recipient.mention})",
+                        inline=True,
+                    )
+                    staff_escalation_embed.add_field(
+                        name="Ticket User ID",
+                        value=str(thread.recipient.id),
+                        inline=True,
+                    )
+                    staff_escalation_embed.add_field(
+                        name="Priority",
+                        value=summary.get("priority", "Medium"),
+                        inline=True,
+                    )
+                    staff_escalation_embed.add_field(
+                        name="Contact Type",
+                        value=summary.get("contact_type", "Support"),
+                        inline=False,
+                    )
+                    staff_escalation_embed.add_field(
+                        name="User Concern",
+                        value=summary.get("user_concern", "N/A")[:1024],
+                        inline=False,
+                    )
+                    staff_escalation_embed.add_field(
+                        name="Ways Attempted to Help",
+                        value=summary.get("ways_attempted", "N/A")[:1024],
+                        inline=False,
+                    )
+                    staff_escalation_embed.add_field(
+                        name="Escalation Reason",
+                        value=summary.get("escalation_reason", "N/A")[:1024],
+                        inline=False,
+                    )
+                    staff_escalation_embed.add_field(
+                        name="⚠️ Urgency Note",
+                        value=summary.get("urgency_note", "N/A")[:1024],
+                        inline=False,
+                    )
+                    staff_escalation_embed.set_footer(
+                        text="Air Canada Helpdesk AI Assistant will no longer respond in this ticket."
+                    )
+
+                    await thread.channel.send(content="@here", embed=staff_escalation_embed)
+                    return
 
         # Normal non-escalated response
         clean_reply = format_brand_mentions(ai_reply.strip())
@@ -305,16 +436,13 @@ class GroqAutoResponder(commands.Cog):
         if not thread:
             return await ctx.send("❌ This command must be used inside an active Modmail ticket channel.")
 
-        if thread.id in self.active_threads:
-            self.active_threads.pop(thread.id)
-            embed = discord.Embed(
-                title="✅ Ticket Taken Over",
-                description=f"{ctx.author.mention} has taken over this ticket. AI Assistant is now disabled for this thread.",
-                color=discord.Color.green(),
-            )
-            await ctx.send(embed=embed)
-        else:
-            await ctx.send("ℹ️ AI Assistant is already paused or inactive in this ticket.")
+        self.active_threads.pop(thread.id, None)
+        embed = discord.Embed(
+            title="✅ Ticket Taken Over",
+            description=f"{ctx.author.mention} has taken over this ticket and will assist the guest from here.",
+            color=discord.Color.green(),
+        )
+        await ctx.send(embed=embed)
 
     @commands.command(name="setgroqkey")
     @checks.has_permissions(PermissionLevel.ADMIN)
